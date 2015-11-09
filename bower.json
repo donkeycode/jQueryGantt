@@ -21,10 +21,9 @@
       "ganttDrawerSVG.js",
       "ganttGridEditor.js",
       "ganttMaster.js",
-      "platform.css",
       "libs/dateField/jquery.dateField.css",
       "libs/jquery.svg.css",
-      "libs/gantt.css"
+      "gantt.css"
   ],
   "license": "MIT",
   "ignore": [
