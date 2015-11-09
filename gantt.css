@@ -1,8 +1,4 @@
 
-body{
-  overflow: hidden;
-}
-
 /* -------------------------------------- GRIDIFY -----------------------------------*/
 .gdfTable {
   table-layout: fixed;
@@ -293,7 +289,7 @@ body{
 }
 
 .taskEditRow.rowSelected td,.taskEditRow.rowSelected input{
-  background-color:#FFFF99;  
+  background-color:#FFFF99;
 }
 
 input[readonly]{
