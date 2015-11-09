@@ -23,7 +23,6 @@
       "ganttMaster.js",
       "platform.css",
       "libs/dateField/jquery.dateField.css",
-      "gantt.css",
       "libs/jquery.svg.css"
   ],
   "license": "MIT",
