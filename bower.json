@@ -1,0 +1,36 @@
+{
+  "name": "jQueryGantt",
+  "version": "0.0.0",
+  "homepage": "https://github.com/donkeycode/jQueryGantt",
+  "authors": [
+    "Sophie Longo <sophie@donkeycode.com>"
+  ],
+  "description": "Package bower - jQueryGantt",
+  "main": [
+      "libs/jquery.livequery.min.js",
+      "libs/jquery.timers.js",
+      "libs/platform.js",
+      "libs/date.js",
+      "libs/i18nJs.js",
+      "libs/dateField/jquery.dateField.js",
+      "libs/JST/jquery.JST.js",
+      "libs/jquery.svg.min.js",
+      "libs/jquery.svgdom.1.8.js",
+      "ganttUtilities.js",
+      "ganttTask.js",
+      "ganttDrawerSVG.js",
+      "ganttGridEditor.js",
+      "ganttMaster.js",
+      "platform.css",
+      "libs/dateField/jquery.dateField.css",
+      "gantt.css",
+      "ganttPrint.css",
+      "libs/jquery.svg.css"
+  ],
+  "license": "MIT",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components"
+  ]
+}
