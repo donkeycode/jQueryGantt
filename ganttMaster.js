@@ -781,8 +781,8 @@ GanttMaster.prototype.addAboveCurrentTask=function(){
   var ch;
   var row = 0;
   if (self.currentTask) {
-    //cannot add brothers to root
-    if (self.currentTask.level <= 0)
+    //cannot outdent root
+    if (self.currentTask.level < 0)
       return;
 
     ch = factory.build("tmp_" + new Date().getTime(), "", "", self.currentTask.level, self.currentTask.start, 1);
