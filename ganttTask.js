@@ -58,7 +58,7 @@ function Task(id, name, code, level, start, end, duration, collapsed) {
   this.endIsMilestone = false;
 
   this.collapsed = collapsed;
-
+  
   this.rowElement; //row editor html element
   this.ganttElement; //gantt html element
   this.master;
