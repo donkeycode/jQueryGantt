@@ -311,7 +311,7 @@ Task.prototype.moveTo = function (start, ignoreMilestones) {
       return false;
     }
 
-
+    
     var panDelta = originalPeriod.start - this.start;
     //console.debug("panDelta",panDelta);
     //loops children to shift them
