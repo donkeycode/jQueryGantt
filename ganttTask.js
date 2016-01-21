@@ -322,7 +322,7 @@ Task.prototype.moveTo = function (start, ignoreMilestones) {
         return false;
       }
     }
-
+  
 
     //console.debug("set period: somethingChanged",this);
     if (!updateTree(this)) {
