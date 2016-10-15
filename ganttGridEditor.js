@@ -116,7 +116,7 @@ GridEditor.prototype.addTask = function (task, row, hideIfParentCollapsed) {
     var collapsedDescendant = this.master.getCollapsedDescendant();
     if(collapsedDescendant.indexOf(task) >= 0) taskRow.hide();
   }
-          
+
 
   return taskRow;
 };
@@ -482,6 +482,7 @@ GridEditor.prototype.openFullEditor = function (task, taskRow) {
   }
 
   taskEditor.find("#end").val(new Date(task.end).format());
+  taskEditor.find("#total_length").val(task.total_length);
 
   //taskEditor.find("[name=depends]").val(task.depends);
 
@@ -602,6 +603,7 @@ GridEditor.prototype.openFullEditor = function (task, taskRow) {
       task.duration = parseInt(taskEditor.find("#duration").val());
       task.startIsMilestone = taskEditor.find("#startIsMilestone").is(":checked");
       task.endIsMilestone = taskEditor.find("#endIsMilestone").is(":checked");
+      task.total_length = taskEditor.find("#total_length").val();
 
       //set assignments
       taskEditor.find("tr[assigId]").each(function () {
