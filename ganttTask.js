@@ -1,668 +1,1034 @@
 /*
- Copyright (c) 2012-2014 Open Lab
- Written by Roberto Bicchierai and Silvia Chelazzi http://roberto.open-lab.com
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
+  Copyright (c) 2012-2014 Open Lab
+  Written by Roberto Bicchierai and Silvia Chelazzi http://roberto.open-lab.com
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
 
- The above copyright notice and this permission notice shall be
- included in all copies or substantial portions of the Software.
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
 
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-function GridEditor(master) {
-  this.master = master; // is the a GantEditor instance
-  this.gridified = $.gridify($.JST.createFromTemplate({}, "TASKSEDITHEAD"));
-  this.element = this.gridified.find(".gdfTable").eq(1);
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+/**
+ * A method to instantiate valid task models from
+ * raw data.
+*/
+function TaskFactory() {
+
+  /**
+   * Build a new Task
+   */
+  this.build = function(id, name, code, level, start, duration, collapsed) {
+    // Set at beginning of day
+    var adjusted_start = computeStart(start);
+    var calculated_end = computeEndByDuration(adjusted_start, duration);
+
+    return new Task(id, name, code, level, adjusted_start, calculated_end, duration, collapsed);
+  };
+
 }
 
+function Task(id, name, code, level, start, end, duration, collapsed) {
+  this.id = id;
+  this.name = name;
+  this.progress=0;
+  this.description = "";
+  this.code = code;
+  this.level = level;
+  this.status = "STATUS_UNDEFINED";
+  this.depends="";
+  this.canWrite=true; // by default all tasks are writeable
 
-GridEditor.prototype.fillEmptyLines = function () {
-  var factory = new TaskFactory();
+  this.start = start
+  this.duration = duration;
+  this.end = end;
+  this.startIsMilestone = false;
+  this.endIsMilestone = false;
 
-  //console.debug("GridEditor.fillEmptyLines");
-  var rowsToAdd = 30 - this.element.find(".taskEditRow").size();
+  this.collapsed = collapsed;
+  
+  this.rowElement; //row editor html element
+  this.ganttElement; //gantt html element
+  this.master;
 
-  //fill with empty lines
-  for (var i = 0; i < rowsToAdd; i++) {
-    var emptyRow = $.JST.createFromTemplate({}, "TASKEMPTYROW");
-    //click on empty row create a task and fill above
-    var master = this.master;
-    emptyRow.click(function (ev) {
-      var emptyRow = $(this);
-      //add on the first empty row only
-      if (!master.canWrite || emptyRow.prevAll(".emptyRow").size() > 0)
-        return
+  this.assigs = [];
+}
 
-      master.beginTransaction();
-      var lastTask;
-      var start = new Date().getTime();
-      var level = 0;
-      if (master.tasks[0]) {
-        start = master.tasks[0].start;
-        level = master.tasks[0].level + 1;
+Task.prototype.clone = function () {
+  var ret = {};
+  for (var key in this) {
+    if (typeof(this[key]) != "function") {
+      ret[key] = this[key];
+    }
+  }
+  return ret;
+};
+
+Task.prototype.getAssigsString = function () {
+  var ret = "";
+  for (var i=0;i<this.assigs.length;i++) {
+    var ass = this.assigs[i];
+    var res = this.master.getResource(ass.resourceId);
+    if (res) {
+      ret = ret + (ret == "" ? "" : ", ") + res.name;
+    }
+  }
+  return ret;
+};
+
+Task.prototype.createAssignment = function (id, resourceId, roleId, effort) {
+  var assig = new Assignment(id, resourceId, roleId, effort);
+  this.assigs.push(assig);
+  return assig;
+};
+
+
+//<%---------- SET PERIOD ---------------------- --%>
+Task.prototype.setPeriod = function (start, end) {
+  //console.debug("setPeriod ",this.name,new Date(start),new Date(end));
+  //var profilerSetPer = new Profiler("gt_setPeriodJS");
+
+  if (start instanceof Date) {
+    start = start.getTime();
+  }
+
+  if (end instanceof Date) {
+    end = end.getTime();
+  }
+
+  var originalPeriod = {
+    start: this.start,
+    end:  this.end,
+    duration: this.duration
+  };
+
+  //console.debug("setStart",date,date instanceof Date);
+  var wantedStartMillis = start;
+
+  //cannot start after end
+  if (start > end) {
+    start = end;
+  }
+
+  //set a legal start
+  start = computeStart(start);
+
+  //if depends -> start is set to max end + lag of superior
+  var sups = this.getSuperiors();
+  if (sups && sups.length > 0) {
+
+    var supEnd = 0;
+    for (var i=0;i<sups.length;i++) {
+      var link = sups[i];
+      supEnd = Math.max(supEnd, incrementDateByWorkingDays(link.from.end, link.lag));
+    }
+    //if changed by depends move it
+    if (computeStart(supEnd) != start) {
+      return this.moveTo(supEnd + 1, false);
+    }
+  }
+
+  var somethingChanged = false;
+
+  //move date to closest day
+  var date = new Date(start);
+
+  if (this.start != start || this.start != wantedStartMillis) {
+    this.start = start;
+    somethingChanged = true;
+  }
+
+  //set end
+  var wantedEndMillis = end;
+  end = computeEnd(end);
+
+  if (this.end != end || this.end != wantedEndMillis) {
+    this.end = end;
+    somethingChanged = true;
+  }
+
+
+  this.duration = recomputeDuration(this.start, this.end);
+
+  //profilerSetPer.stop();
+
+  //nothing changed exit
+  if (!somethingChanged)
+    return true;
+
+  //cannot write exit
+  if(!this.canWrite){
+    this.master.setErrorOnTransaction(GanttMaster.messages["CANNOT_WRITE"] + "\n" + this.name, this);
+    return false;
+  }
+
+  //external dependencies: exit with error
+  if (this.hasExternalDep) {
+    this.master.setErrorOnTransaction(GanttMaster.messages["TASK_HAS_EXTERNAL_DEPS"] + "\n" + this.name, this);
+    return false;
+  }
+
+  var todoOk = true;
+
+  //I'm restricting
+  var deltaPeriod = originalPeriod.duration - this.duration;
+  var restricting = deltaPeriod > 0;
+  var restrictingStart = restricting && (originalPeriod.start < this.start);
+  var restrictingEnd = restricting && (originalPeriod.end > this.end);
+
+  //console.debug( " originalPeriod.duration "+ originalPeriod.duration +" deltaPeriod "+deltaPeriod+" "+"restricting "+restricting);
+
+  if (restricting) {
+    //loops children to get boundaries
+    var children = this.getChildren();
+    var bs = Infinity;
+    var be = 0;
+    for (var i=0;i<children.length;i++) {
+
+      ch = children[i];
+      //console.debug("restricting: test child "+ch.name+" "+ch.end)
+      if (restrictingEnd) {
+        be = Math.max(be, ch.end);
+      } else {
+        bs = Math.min(bs, ch.start);
+      }
+    }
+
+    if (restrictingEnd) {
+      //console.debug("restricting end ",be, this.end);
+      this.end = Math.max(be, this.end);
+    } else {
+      //console.debug("restricting start");
+      this.start = Math.min(bs, this.start);
+    }
+
+     this.duration = recomputeDuration(this.start, this.end);
+  } else {
+
+    //check global boundaries
+    if (this.start < this.master.minEditableDate || this.end > this.master.maxEditableDate) {
+      this.master.setErrorOnTransaction(GanttMaster.messages["CHANGE_OUT_OF_SCOPE"], this);
+      todoOk = false;
+    }
+
+    //console.debug("set period: somethingChanged",this);
+    if (todoOk && !updateTree(this)) {
+      todoOk = false;
+    }
+  }
+
+  if (todoOk) {
+    //and now propagate to inferiors
+    var infs = this.getInferiors();
+    if (infs && infs.length > 0) {
+      for (var i=0;i<infs.length;i++) {
+        var link = infs[i];
+        if (!link.to.canWrite){
+          this.master.setErrorOnTransaction(GanttMaster.messages["CANNOT_WRITE"] + "\n" + link.to.name, link.to);
+          break;
+        }
+        todoOk = link.to.moveTo(end, false); //this is not the right date but moveTo checks start
+        if (!todoOk)
+          break;
+      }
+    }
+  }
+
+  return todoOk;
+};
+
+
+//<%---------- MOVE TO ---------------------- --%>
+Task.prototype.moveTo = function (start, ignoreMilestones) {
+  //console.debug("moveTo ",this,start,ignoreMilestones);
+  //var profiler = new Profiler("gt_task_moveTo");
+
+  if (start instanceof Date) {
+    start = start.getTime();
+  }
+
+  var originalPeriod = {
+    start:this.start,
+    end:this.end
+  };
+
+  var wantedStartMillis = start;
+
+  //set a legal start
+  start = computeStart(start);
+
+  //if start is milestone cannot be move
+  if (!ignoreMilestones && this.startIsMilestone && start != this.start) {
+    //notify error
+    this.master.setErrorOnTransaction(GanttMaster.messages["START_IS_MILESTONE"], this);
+    return false;
+  } else if (this.hasExternalDep) {
+    //notify error
+    this.master.setErrorOnTransaction(GanttMaster.messages["TASK_HAS_EXTERNAL_DEPS"], this);
+    return false;
+  }
+
+  //if depends start is set to max end + lag of superior
+  var sups = this.getSuperiors();
+  if (sups && sups.length > 0) {
+    var supEnd = 0;
+    for (var i=0;i<sups.length;i++) {
+      var link = sups[i];
+      supEnd = Math.max(supEnd, incrementDateByWorkingDays(link.from.end, link.lag));
+    }
+    start = supEnd + 1;
+  }
+  //set a legal start
+  start = computeStart(start);
+
+  var end = computeEndByDuration(start, this.duration);
+
+  if (this.start != start || this.start != wantedStartMillis) {
+    //in case of end is milestone it never changes, but recompute duration
+    if (!ignoreMilestones && this.endIsMilestone) {
+      end = this.end;
+      this.duration = recomputeDuration(start, end);
+    }
+    this.start = start;
+    this.end = end;
+    //profiler.stop();
+
+    //check global boundaries
+    if (this.start < this.master.minEditableDate || this.end > this.master.maxEditableDate) {
+      this.master.setErrorOnTransaction(GanttMaster.messages["CHANGE_OUT_OF_SCOPE"], this);
+      return false;
+    }
+
+    
+    var panDelta = originalPeriod.start - this.start;
+    //console.debug("panDelta",panDelta);
+    //loops children to shift them
+    var children = this.getChildren();
+    for (var i=0;i<children.length;i++) {
+      ch = children[i];
+      if (!ch.moveTo(ch.start - panDelta, false)) {
+        return false;
+      }
+    }
+  
+
+    //console.debug("set period: somethingChanged",this);
+    if (!updateTree(this)) {
+      return false;
+    }
+
+
+    //and now propagate to inferiors
+    var infs = this.getInferiors();
+    if (infs && infs.length > 0) {
+      for (var i=0;i<infs.length;i++) {
+        var link = infs[i];
+
+
+        //this is not the right date but moveTo checks start
+        if (!link.to.canWrite ) {
+          this.master.setErrorOnTransaction(GanttMaster.messages["CANNOT_WRITE"]+ "\n"+link.to.name, link.to);
+        } else if (!link.to.moveTo(end, false)) {
+          return false;
+        }
+      }
+    }
+
+  }
+
+  return true;
+};
+
+
+function updateTree(task) {
+  //console.debug("updateTree ",task);
+  var error;
+
+  //try to enlarge parent
+  var p = task.getParent();
+
+  //no parent:exit
+  if (!p)
+    return true;
+
+  var newStart = p.start;
+  var newEnd = p.end;
+
+  if (p.start > task.start) {
+    if (p.startIsMilestone) {
+      task.master.setErrorOnTransaction(GanttMaster.messages["START_IS_MILESTONE"] + "\n" + p.name, task);
+      return false;
+    } else if (p.depends) {
+      task.master.setErrorOnTransaction(GanttMaster.messages["TASK_HAS_CONSTRAINTS"] + "\n" + p.name, task);
+      return false;
+    }
+
+    newStart = task.start;
+  }
+
+  if (p.end < task.end) {
+    if (p.endIsMilestone) {
+      task.master.setErrorOnTransaction(GanttMaster.messages["END_IS_MILESTONE"] + "\n" + p.name, task);
+      return false;
+    }
+
+    newEnd = task.end;
+  }
+
+  //propagate updates if needed
+  if (newStart != p.start || newEnd != p.end) {
+
+    //can write?
+    if (!p.canWrite){
+      task.master.setErrorOnTransaction(GanttMaster.messages["CANNOT_WRITE"] + "\n" + p.name, task);
+      return false;
+    }
+
+    //has external deps ?
+    if (p.hasExternalDep) {
+      task.master.setErrorOnTransaction(GanttMaster.messages["TASK_HAS_EXTERNAL_DEPS"] + "\n" + p.name, task);
+      return false;
+    }
+
+    return p.setPeriod(newStart, newEnd);
+  }
+
+
+  return true;
+}
+
+//<%---------- CHANGE STATUS ---------------------- --%>
+Task.prototype.changeStatus = function(newStatus) {
+  //console.debug("changeStatus: "+this.name+" from "+this.status+" -> "+newStatus);
+  //compute descendant for identify a cone where status changes propagate
+  var cone = this.getDescendant();
+
+  function propagateStatus(task, newStatus, manuallyChanged, propagateFromParent, propagateFromChildren) {
+    //console.debug("propagateStatus",task.name, task.status,newStatus)
+    var oldStatus = task.status;
+
+    //no changes exit
+    if(newStatus == oldStatus){
+      return true;
+    }
+    //console.debug("propagateStatus: "+task.name + " from " + task.status + " to " + newStatus + " " + (manuallyChanged?" a manella":"")+(propagateFromParent?" da parent":"")+(propagateFromChildren?" da children":""));
+
+    var todoOk = true;
+    task.status = newStatus;
+
+    if( task.master.cannotCloseTaskIfIssueOpen && newStatus=="STATUS_DONE" && task.openIssues>0){
+      task.master.setErrorOnTransaction(GanttMaster.messages["CANNOT_CLOSE_TASK_IF_OPEN_ISSUE"] +" " +task.name);
+      return false;
+    }
+
+    //xxxx -> STATUS_DONE            may activate dependent tasks, both suspended and undefined. Will set to done all descendants.
+    //STATUS_FAILED -> STATUS_DONE          do nothing if not forced by hand
+    if (newStatus == "STATUS_DONE") {
+
+      if ((manuallyChanged || oldStatus != "STATUS_FAILED")) { //cannot change for cascade when failed
+
+        //can be closed only if superiors are already done
+        var sups = task.getSuperiors();
+        for (var i=0;i<sups.length;i++) {
+          if (cone.indexOf(sups[i].from) < 0) {
+            if (sups[i].from.status != "STATUS_DONE") {
+              if (manuallyChanged || propagateFromParent)
+                task.master.setErrorOnTransaction(GanttMaster.messages["GANTT_ERROR_DEPENDS_ON_OPEN_TASK"] + "\n" + sups[i].from.name + " -> " + task.name);
+              todoOk = false;
+              break;
+            }
+          }
+        }
+
+        if (todoOk) {
+          //todo set progress to 100% if set on config
+
+          var chds = task.getChildren();
+          //set children as done
+          for (var i=0;i<chds.length;i++)
+            propagateStatus(chds[i], "STATUS_DONE", false,true,false);
+
+          //set inferiors as active if outside the cone
+          propagateToInferiors(cone, task.getInferiors(), "STATUS_ACTIVE");
+        }
+      } else {
+        todoOk = false;
       }
 
-      //fill all empty previouses
-      emptyRow.prevAll(".emptyRow").andSelf().each(function () {
-        var ch = factory.build("tmp_fk" + new Date().getTime(), "", "", level, start, 1);
-        var task = master.addTask(ch);
-        lastTask = ch;
-      });
-      master.endTransaction();
-      lastTask.rowElement.click();
-      lastTask.rowElement.find("[name=name]").focus()//focus to "name" input
-        .blur(function () { //if name not inserted -> undo -> remove just added lines
-          var imp = $(this);
-          if (imp.val() == "") {
-            lastTask.name="Task "+(lastTask.getRow()+1);
-            imp.val(lastTask.name);
+
+      //  STATUS_UNDEFINED -> STATUS_ACTIVE       all children become active, if they have no dependencies.
+      //  STATUS_SUSPENDED -> STATUS_ACTIVE       sets to active all children and their descendants that have no inhibiting dependencies.
+      //  STATUS_DONE -> STATUS_ACTIVE            all those that have dependencies must be set to suspended.
+      //  STATUS_FAILED -> STATUS_ACTIVE          nothing happens: child statuses must be reset by hand.
+    } else if (newStatus == "STATUS_ACTIVE") {
+
+      if ((manuallyChanged || oldStatus != "STATUS_FAILED")) { //cannot change for cascade when failed
+
+        //activate parent if closed
+        var par=task.getParent();
+        if (par && par.status != "STATUS_ACTIVE") {
+          todoOk=propagateStatus(par,"STATUS_ACTIVE",false,false,true);
+        }
+
+        if(todoOk){
+          //can be active only if superiors are already done
+          var sups = task.getSuperiors();
+          for (var i=0;i<sups.length;i++) {
+            if (sups[i].from.status != "STATUS_DONE") {
+              if (manuallyChanged || propagateFromChildren)
+              task.master.setErrorOnTransaction(GanttMaster.messages["GANTT_ERROR_DEPENDS_ON_OPEN_TASK"] + "\n" + sups[i].from.name + " -> " + task.name);
+              todoOk = false;
+              break;
+            }
           }
+        }
+
+        if (todoOk) {
+          var chds = task.getChildren();
+          if (oldStatus == "STATUS_UNDEFINED" || oldStatus == "STATUS_SUSPENDED") {
+            //set children as active
+            for (var i=0;i<chds.length;i++)
+              if (chds[i].status != "STATUS_DONE" )
+                propagateStatus(chds[i], "STATUS_ACTIVE", false,true,false);
+          }
+
+          //set inferiors as suspended
+          var infs = task.getInferiors();
+          for (var i=0;i<infs.length;i++)
+            propagateStatus(infs[i].to, "STATUS_SUSPENDED", false,false,false);
+        }
+      } else {
+        todoOk = false;
+      }
+
+      // xxxx -> STATUS_SUSPENDED       all active children and their active descendants become suspended. when not failed or forced
+      // xxxx -> STATUS_UNDEFINED       all active children and their active descendants become suspended. when not failed or forced
+    } else if (newStatus == "STATUS_SUSPENDED" || newStatus == "STATUS_UNDEFINED") {
+      if (manuallyChanged || oldStatus != "STATUS_FAILED") { //cannot change for cascade when failed
+
+        //suspend parent if not active
+        var par=task.getParent();
+        if (par && par.status != "STATUS_ACTIVE") {
+          todoOk=propagateStatus(par,newStatus,false,false,true);
+        }
+
+
+        var chds = task.getChildren();
+        //set children as active
+        for (var i=0;i<chds.length;i++){
+          if (chds[i].status != "STATUS_DONE")
+            propagateStatus(chds[i], newStatus, false,true,false);
+        }
+
+        //set inferiors as STATUS_SUSPENDED or STATUS_UNDEFINED
+        propagateToInferiors(cone, task.getInferiors(), newStatus);
+      } else {
+        todoOk = false;
+      }
+
+      // xxxx -> STATUS_FAILED children and dependent failed
+    } else if (newStatus == "STATUS_FAILED") {
+      var chds = task.getChildren();
+      //set children as failed
+      for (var i=0;i<chds.length;i++)
+        propagateStatus(chds[i], "STATUS_FAILED", false,true,false);
+
+      //set inferiors as active
+      //set children as done
+      propagateToInferiors(cone, task.getInferiors(), "STATUS_FAILED");
+    }
+    if (!todoOk){
+      task.status = oldStatus;
+      //console.debug("status rolled back: "+task.name + " to " + oldStatus);
+    }
+
+    return todoOk;
+  }
+
+  /**
+   * A helper method to traverse an array of 'inferior' tasks
+   * and signal a status change.
+   */
+  function propagateToInferiors(cone, infs, status) {
+    for (var i=0;i<infs.length;i++) {
+      if (cone.indexOf(infs[i].to) < 0) {
+        propagateStatus(infs[i].to, status, false, false, false);
+      }
+    }
+  }
+
+  var todoOk = true;
+  var oldStatus = this.status;
+
+  todoOk = propagateStatus(this, newStatus, true,false,false);
+
+  if (!todoOk)
+    this.status = oldStatus;
+
+  return todoOk;
+};
+
+Task.prototype.synchronizeStatus=function(){
+  var oldS=this.status;
+  this.status="";
+  return this.changeStatus(oldS);
+};
+
+Task.prototype.isLocallyBlockedByDependencies=function(){
+  var sups = this.getSuperiors();
+  var blocked=false;
+  for (var i=0;i<sups.length;i++) {
+    if (sups[i].from.status != "STATUS_DONE") {
+      blocked=true;
+      break;
+    }
+  }
+  return blocked;
+};
+
+//<%---------- TASK STRUCTURE ---------------------- --%>
+Task.prototype.getRow = function() {
+  ret = -1;
+  if (this.master)
+    ret = this.master.tasks.indexOf(this);
+  return ret;
+};
+
+
+Task.prototype.getParents = function() {
+  var ret;
+  if (this.master) {
+    var topLevel = this.level;
+    var pos = this.getRow();
+    ret = [];
+    for (var i = pos; i >= 0; i--) {
+      var par = this.master.tasks[i];
+      if (topLevel > par.level) {
+        topLevel = par.level;
+        ret.push(par);
+      }
+    }
+  }
+  return ret;
+};
+
+
+Task.prototype.getParent = function() {
+  var ret;
+  if (this.master) {
+    for (var i = this.getRow(); i >= 0; i--) {
+      var par = this.master.tasks[i];
+      if (this.level > par.level) {
+        ret = par;
+        break;
+      }
+    }
+  }
+  return ret;
+};
+
+
+Task.prototype.isParent = function() {
+  var ret = false;
+  if (this.master) {
+    var pos = this.getRow();
+    if (pos < this.master.tasks.length - 1)
+      ret = this.master.tasks[pos + 1].level > this.level;
+  }
+  return ret;
+};
+
+
+Task.prototype.getChildren = function() {
+  var ret = [];
+  if (this.master) {
+    var pos = this.getRow();
+    for (var i = pos + 1; i < this.master.tasks.length; i++) {
+      var ch = this.master.tasks[i];
+      if (ch.level == this.level + 1)
+        ret.push(ch);
+      else if (ch.level <= this.level) // exit loop if parent or brother
+        break;
+    }
+  }
+  return ret;
+};
+
+
+Task.prototype.getDescendant = function() {
+  var ret = [];
+  if (this.master) {
+    var pos = this.getRow();
+    for (var i = pos + 1; i < this.master.tasks.length; i++) {
+      var ch = this.master.tasks[i];
+      if (ch.level > this.level)
+        ret.push(ch);
+      else
+        break;
+    }
+  }
+  return ret;
+};
+
+
+Task.prototype.getSuperiors = function() {
+  var ret = [];
+  var task = this;
+  if (this.master) {
+    ret = this.master.links.filter(function(link) {
+      return link.to == task;
+    });
+  }
+  return ret;
+};
+
+Task.prototype.getSuperiorTasks = function() {
+  var ret=[];
+  var sups = this.getSuperiors();
+  for (var i=0;i<sups.length;i++)
+    ret.push(sups[i].from);
+  return ret;
+};
+
+
+Task.prototype.getInferiors = function() {
+  var ret = [];
+  var task = this;
+  if (this.master) {
+    ret = this.master.links.filter(function(link) {
+      return link.from == task;
+    });
+  }
+  return ret;
+};
+
+Task.prototype.getInferiorTasks = function() {
+  var ret=[];
+  var infs = this.getInferiors();
+  for (var i=0;i<infs.length;i++)
+    ret.push(infs[i].to);
+  return ret;
+};
+
+  Task.prototype.deleteTask = function() {
+  
+  //delete both dom elements
+  if (this.rowElement) {
+    this.rowElement.remove();
+  }
+
+  //delete both dom elements
+  if (this.ganttElement) {
+    this.ganttElement.remove();
+  }
+
+  //remove children
+  var chd = this.getChildren();
+  for (var i=0;i<chd.length;i++) {
+    //add removed child in list
+    if(!chd[i].isNew())
+      this.master.deletedTaskIds.push(chd[i].id);
+    chd[i].deleteTask();
+  }
+
+  if(!this.isNew())
+    this.master.deletedTaskIds.push(this.id);
+
+
+  //remove from in-memory collection
+  this.master.tasks.splice(this.getRow(), 1);
+
+  //remove from links
+  var task = this;
+  this.master.links = this.master.links.filter(function(link) {
+    return link.from != task && link.to != task;
+  });
+};
+
+
+Task.prototype.isNew=function(){
+  return (this.id+"").indexOf("tmp_")==0;
+};
+
+Task.prototype.isDependent=function(t) {
+  //console.debug("isDependent",this.name, t.name)
+  var task=this;
+  var dep= this.master.links.filter(function(link) {
+    return link.from == task ;
+  });
+
+  // is t a direct dependency?
+  for (var i=0;i<dep.length;i++) {
+    if (dep[i].to== t)
+      return true;
+  }
+  // is t an indirect dependency
+  for (var i=0;i<dep.length;i++) {
+    if (dep[i].to.isDependent(t)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+Task.prototype.setLatest=function(maxCost) {
+  this.latestStart = maxCost - this.criticalCost;
+  this.latestFinish = this.latestStart + this.duration;
+};
+
+
+//<%------------------------------------------  INDENT/OUTDENT --------------------------------%>
+Task.prototype.indent = function() {
+  //console.debug("indent", this);
+  //a row above must exist
+  var row = this.getRow();
+
+  //no row no party
+  if (row <=0)
+    return false;
+
+  var ret = false;
+  var taskAbove = this.master.tasks[row - 1];
+  var newLev = this.level + 1;
+  if (newLev <= taskAbove.level + 1) {
+    ret = true;
+    //trick to get parents after indent
+    this.level++;
+    var futureParents = this.getParents();
+    this.level--;
+    var oldLevel = this.level;
+    for (var i = row; i < this.master.tasks.length; i++) {
+      var desc = this.master.tasks[i];
+      if (desc.level > oldLevel || desc == this) {
+        desc.level++;
+        //remove links from descendant to my parents
+        this.master.links = this.master.links.filter(function(link) {
+          var linkToParent = false;
+          if (link.to == desc)
+            linkToParent = futureParents.indexOf(link.from) >= 0;
+          else if (link.from == desc)
+            linkToParent = futureParents.indexOf(link.to) >= 0;
+          return !linkToParent;
         });
-    });
-    this.element.append(emptyRow);
-  }
-};
-
-
-GridEditor.prototype.addTask = function (task, row, hideIfParentCollapsed) {
-  //console.debug("GridEditor.addTask",task,row);
-  //var prof = new Profiler("editorAddTaskHtml");
-
-  //remove extisting row
-  this.element.find("[taskId=" + task.id + "]").remove();
-
-  var taskRow = $.JST.createFromTemplate(task, "TASKROW");
-  //save row element on task
-  task.rowElement = taskRow;
-
-  this.bindRowEvents(task, taskRow);
-
-  if (typeof(row) != "number") {
-    var emptyRow = this.element.find(".emptyRow:first"); //tries to fill an empty row
-    if (emptyRow.size() > 0)
-      emptyRow.replaceWith(taskRow);
-    else
-      this.element.append(taskRow);
-  } else {
-    var tr = this.element.find("tr.taskEditRow").eq(row);
-    if (tr.size() > 0) {
-      tr.before(taskRow);
-    } else {
-      this.element.append(taskRow);
+      } else
+        break;
     }
 
+    var parent = this.getParent();
+    // set start date to parent' start if no deps
+    if(parent && !this.depends){
+    	var new_end = computeEndByDuration(parent.start, this.duration);
+    	this.master.changeTaskDates(this, parent.start, new_end);
+    }
+    //recompute depends string
+    this.master.updateDependsStrings();
+    //enlarge parent using a fake set period
+    this.setPeriod(this.start + 1, this.end + 1);
+
+    //force status check
+    this.synchronizeStatus();
   }
-  // this.element.find(".taskRowIndex").each(function (i, el) {
-  //   $(el).html(i + 1);
-  // });
-  //prof.stop();
-
-
-  //[expand]
-  if(hideIfParentCollapsed)
-  {
-    if(task.collapsed) taskRow.find(".exp-controller").removeClass('exp');
-    var collapsedDescendant = this.master.getCollapsedDescendant();
-    if(collapsedDescendant.indexOf(task) >= 0) taskRow.hide();
-  }
-
-
-  return taskRow;
+  return ret;
 };
 
-GridEditor.prototype.refreshExpandStatus = function(task){
-  if(!task) return;
-  //[expand]
-  var child = task.getChildren();
-  if(child.length > 0 && task.rowElement.has(".expcoll").length == 0)
-  {
-    task.rowElement.find(".exp-controller").addClass('expcoll exp');
-  }
-  else if(child.length == 0 && task.rowElement.has(".expcoll").length > 0)
-  {
-    task.rowElement.find(".exp-controller").removeClass('expcoll exp');
+
+Task.prototype.outdent = function() {
+  //console.debug("outdent", this);
+
+  //a level must be >0
+  if (this.level <= 0)
+    return false;
+
+  var ret = false;
+  var oldLevel = this.level;
+
+  ret = true;
+  var row = this.getRow();
+  for (var i = row; i < this.master.tasks.length; i++) {
+    var desc = this.master.tasks[i];
+    if (desc.level > oldLevel || desc == this) {
+      desc.level--;
+    } else
+      break;
   }
 
-  var par = task.getParent();
-  if(par && par.rowElement.has(".expcoll").length == 0)
-  {
-    par.rowElement.find(".exp-controller").addClass('expcoll exp');
+  var task = this;
+  var chds = this.getChildren();
+  //remove links from me to my new children
+  this.master.links = this.master.links.filter(function(link) {
+    var linkExist = (link.to == task && chds.indexOf(link.from) >= 0 || link.from == task && chds.indexOf(link.to) >= 0);
+    return !linkExist;
+  });
+
+
+  //enlarge me if inherited children are larger
+  for (var i=0;i<chds.length;i++) {
+    //remove links from me to my new children
+    chds[i].setPeriod(chds[i].start + 1, chds[i].end + 1);
   }
 
+  //recompute depends string
+  this.master.updateDependsStrings();
+
+  //enlarge parent using a fake set period
+  this.setPeriod(this.start + 1, this.end + 1);
+
+  //force status check
+  this.synchronizeStatus();
+  return ret;
+};
+
+
+//<%------------------------------------------  MOVE UP / MOVE DOWN --------------------------------%>
+Task.prototype.moveUp = function() {
+  //console.debug("moveUp", this);
+  var ret = false;
+
+  //a row above must exist
+  var row = this.getRow();
+
+  //no row no party
+  if (row <=0)
+    return false;
+
+  //find new row
+  var newRow;
+  for (newRow = row - 1; newRow >= 0; newRow--) {
+    if (this.master.tasks[newRow].level <= this.level)
+      break;
+  }
+
+  //is a parent or a brother
+  if (this.master.tasks[newRow].level == this.level) {
+    ret = true;
+    //compute descendant
+    var descNumber = 0;
+    for (var i = row + 1; i < this.master.tasks.length; i++) {
+      var desc = this.master.tasks[i];
+      if (desc.level > this.level) {
+        descNumber++;
+      } else {
+        break;
+      }
+    }
+    //move in memory
+    var blockToMove = this.master.tasks.splice(row, descNumber + 1);
+    var top = this.master.tasks.splice(0, newRow);
+    this.master.tasks = [].concat(top, blockToMove, this.master.tasks);
+    //move on dom
+    var rows = this.master.editor.element.find("tr[taskid]");
+    var domBlockToMove = rows.slice(row, row + descNumber + 1);
+    rows.eq(newRow).before(domBlockToMove);
+
+    //recompute depends string
+    this.master.updateDependsStrings();
+  } else {
+    this.master.setErrorOnTransaction(GanttMaster.messages["TASK_MOVE_INCONSISTENT_LEVEL"], this);
+    ret = false;
+  }
+  return ret;
+};
+
+
+Task.prototype.moveDown = function() {
+  //console.debug("moveDown", this);
+
+  //a row below must exist, and cannot move root task
+  var row = this.getRow();
+  if (row >= this.master.tasks.length - 1 || row==0)
+    return false;
+
+  var ret = false;
+
+  //find nearest brother
+  var newRow;
+  for (newRow = row + 1; newRow < this.master.tasks.length; newRow++) {
+    if (this.master.tasks[newRow].level <= this.level)
+      break;
+  }
+
+  //is brother
+  if (this.master.tasks[newRow] && this.master.tasks[newRow].level == this.level) {
+    ret = true;
+    //find last desc
+    for (newRow = newRow + 1; newRow < this.master.tasks.length; newRow++) {
+      if (this.master.tasks[newRow].level <= this.level)
+        break;
+    }
+
+    //compute descendant
+    var descNumber = 0;
+    for (var i = row + 1; i < this.master.tasks.length; i++) {
+      var desc = this.master.tasks[i];
+      if (desc.level > this.level) {
+        descNumber++;
+      } else {
+        break;
+      }
+    }
+
+    //move in memory
+    var blockToMove = this.master.tasks.splice(row, descNumber + 1);
+    var top = this.master.tasks.splice(0, newRow - descNumber - 1);
+    this.master.tasks = [].concat(top, blockToMove, this.master.tasks);
+
+
+    //move on dom
+    var rows = this.master.editor.element.find("tr[taskid]");
+    var aft = rows.eq(newRow - 1);
+    var domBlockToMove = rows.slice(row, row + descNumber + 1);
+    aft.after(domBlockToMove);
+
+    //recompute depends string
+    this.master.updateDependsStrings();
+  }
+
+  return ret;
+};
+
+
+//<%------------------------------------------------------------------------  LINKS OBJECT ---------------------------------------------------------------%>
+function Link(taskFrom, taskTo, lagInWorkingDays) {
+  this.from = taskFrom;
+  this.to = taskTo;
+  this.lag = lagInWorkingDays;
 }
 
-GridEditor.prototype.refreshTaskRow = function (task) {
-  //console.debug("refreshTaskRow")
-  //var profiler = new Profiler("editorRefreshTaskRow");
-  var row = task.rowElement;
 
-  row.find(".taskRowIndex").html(task.getRow() + 1);
-  row.find(".indentCell").css("padding-left", task.level * 10 +18 );
-  row.find("[name=name]").val(task.name);
-  row.find("[name=code]").val(task.code);
-  row.find("[status]").attr("status", task.status);
-
-  row.find("[name=duration]").val(task.duration);
-  row.find("[name=start]").val(new Date(task.start).format()).updateOldValue(); // called on dates only because for other field is called on focus event
-  row.find("[name=end]").val(new Date(task.end).format()).updateOldValue();
-  row.find("[name=depends]").val(task.depends);
-  row.find(".taskAssigs").html(task.getAssigsString());
-
-  //profiler.stop();
-};
-
-GridEditor.prototype.redraw = function () {
-  for (var i = 0; i < this.master.tasks.length; i++) {
-    this.refreshTaskRow(this.master.tasks[i]);
-  }
-};
-
-GridEditor.prototype.reset = function () {
-  this.element.find("[taskid]").remove();
-};
-
-
-GridEditor.prototype.bindRowEvents = function (task, taskRow) {
-  var self = this;
-  //console.debug("bindRowEvents",this,this.master,this.master.canWrite, task.canWrite);
-  if (this.master.canWrite && task.canWrite ) {
-    self.bindRowInputEvents(task, taskRow);
-
-  } else { //cannot write: disable input
-    taskRow.find("input").attr("readonly", true);
-  }
-
-  self.bindRowExpandEvents(task, taskRow);
-
-  taskRow.find(".edit").click(function () {self.openFullEditor(task, taskRow)});
-};
-
-
-GridEditor.prototype.bindRowExpandEvents = function (task, taskRow) {
-  var self = this;
-  //expand collapse
-   taskRow.find(".exp-controller").click(function(){
-   //expand?
-     var el=$(this);
-     var taskId=el.closest("[taskid]").attr("taskid");
-     var task=self.master.getTask(taskId);
-     var descs=task.getDescendant();
-     el.toggleClass('exp');
-     task.collapsed = !el.is(".exp");
-    var collapsedDescendant = self.master.getCollapsedDescendant();
-
-     if (el.is(".exp")){
-        for (var i=0;i<descs.length;i++)
-        {
-          var childTask = descs[i];
-          if(collapsedDescendant.indexOf(childTask) >= 0) continue;
-          childTask.rowElement.show();
-        }
-
-     } else {
-        for (var i=0;i<descs.length;i++)
-        descs[i].rowElement.hide();
-     }
-     self.master.gantt.refreshGantt();
-
-   });
+//<%------------------------------------------------------------------------  ASSIGNMENT ---------------------------------------------------------------%>
+function Assignment(id, resourceId, roleId, effort) {
+  this.id = id;
+  this.resourceId = resourceId;
+  this.roleId = roleId;
+  this.effort = effort;
 }
 
-GridEditor.prototype.bindRowInputEvents = function (task, taskRow) {
-  var self = this;
 
-  //bind dateField on dates
-  taskRow.find(".date").each(function () {
-    var el = $(this);
+//<%------------------------------------------------------------------------  RESOURCE ---------------------------------------------------------------%>
+function Resource(id, name) {
+  this.id = id;
+  this.name = name;
+}
 
-    //start is readonly in case of deps
-    if (task.depends && el.attr("name") == "start") {
-      el.attr("readonly", "true");
-    } else {
-      el.removeAttr("readonly");
-    }
 
-    el.click(function () {
-      var inp = $(this);
-      inp.dateField({
-        inputField:el
-      });
-    });
+//<%------------------------------------------------------------------------  ROLE ---------------------------------------------------------------%>
+function Role(id, name) {
+  this.id = id;
+  this.name = name;
+}
 
-    el.blur(function (date) {
-      var inp = $(this);
-      if (inp.isValueChanged()) {
-        if (!Date.isValid(inp.val())) {
-          alert(GanttMaster.messages["INVALID_DATE_FORMAT"]);
-          inp.val(inp.getOldValue());
 
-        } else {
-          var date = Date.parseString(inp.val());
-          var row = inp.closest("tr");
-          var taskId = row.attr("taskId");
-          var task = self.master.getTask(taskId);
-          var lstart = task.start;
-          var lend = task.end;
 
-          if (inp.attr("name") == "start") {
-            lstart = date.getTime();
-            if (lstart >= lend) {
-              var end_as_date = new Date(lstart);
-              lend = end_as_date.add('d', task.duration).getTime();
-            }
 
-            //update task from editor
-            self.master.beginTransaction();
-            self.master.moveTask(task, lstart);
-            self.master.endTransaction();
-
-          } else {
-            lend = date.getTime();
-            if (lstart >= lend) {
-              lend=lstart;
-            }
-            lend=lend+3600000*20; // this 20 hours are mandatory to reach the correct day end (snap to grid)
-
-            //update task from editor
-            self.master.beginTransaction();
-            self.master.changeTaskDates(task, lstart, lend);
-            self.master.endTransaction();
-          }
-
-
-          inp.updateOldValue(); //in order to avoid multiple call if nothing changed
-        }
-      }
-    });
-  });
-
-
-  //binding on blur for task update (date exluded as click on calendar blur and then focus, so will always return false, its called refreshing the task row)
-  taskRow.find("input:not(.date)").focus(function () {
-    $(this).updateOldValue();
-
-  }).blur(function () {
-      var el = $(this);
-      if (el.isValueChanged()) {
-        var row = el.closest("tr");
-        var taskId = row.attr("taskId");
-
-        var task = self.master.getTask(taskId);
-
-        //update task from editor
-        var field = el.attr("name");
-
-        self.master.beginTransaction();
-
-        if (field == "depends") {
-          var oldDeps = task.depends;
-          task.depends = el.val();
-
-          //start is readonly in case of deps
-          if (task.depends) {
-            row.find("[name=start]").attr("readonly", "true");
-          } else {
-            row.find("[name=start]").removeAttr("readonly");
-          }
-
-
-          // update links
-          var linkOK = self.master.updateLinks(task);
-          if (linkOK) {
-            //synchronize status from superiors states
-            var sups = task.getSuperiors();
-            for (var i = 0; i < sups.length; i++) {
-              if (!sups[i].from.synchronizeStatus())
-                break;
-            }
-            self.master.changeTaskDates(task, task.start, task.end); // fake change to force date recomputation from dependencies
-          }
-
-        } else if (field == "duration") {
-          var dur = task.duration;
-          dur = parseInt(el.val()) || 1;
-          el.val(dur);
-          var newEnd = computeEndByDuration(task.start, dur);
-          self.master.changeTaskDates(task, task.start, newEnd);
-
-        } else if (field == "name" && el.val() == "") { // remove unfilled task
-            task.deleteTask();
-
-        } else {
-          task[field] = el.val();
-        }
-        self.master.endTransaction();
-      }
-    });
-
-  //cursor key movement
-  taskRow.find("input").keydown(function (event) {
-    var theCell = $(this);
-    var theTd = theCell.parent();
-    var theRow = theTd.parent();
-    var col = theTd.prevAll("td").size();
-
-    var ret = true;
-    switch (event.keyCode) {
-
-      case 37: //left arrow
-        if(this.selectionEnd==0)
-          theTd.prev().find("input").focus();
-        break;
-      case 39: //right arrow
-        if(this.selectionEnd==this.value.length)
-          theTd.next().find("input").focus();
-        break;
-
-      case 38: //up arrow
-        var prevRow = theRow.prev();
-        var td = prevRow.find("td").eq(col);
-        var inp = td.find("input");
-
-        if (inp.size()>0)
-          inp.focus();
-        break;
-      case 40: //down arrow
-        var nextRow = theRow.next();
-        var td = nextRow.find("td").eq(col);
-        var inp = td.find("input");
-        if (inp.size()>0)
-          inp.focus();
-        else
-          nextRow.click(); //create a new row
-        break;
-      case 36: //home
-        break;
-      case 35: //end
-        break;
-
-      case 9: //tab
-       case 13: //enter
-       break;
-    }
-    return ret;
-
-  }).focus(function () {
-    $(this).closest("tr").click();
-  });
-
-
-  //change status
-  taskRow.find(".taskStatus").click(function () {
-    var el = $(this);
-    var tr = el.closest("[taskid]");
-    var taskId = tr.attr("taskid");
-    var task = self.master.getTask(taskId);
-
-    var changer = $.JST.createFromTemplate({}, "CHANGE_STATUS");
-    changer.find("[status=" + task.status + "]").addClass("selected");
-    changer.find(".taskStatus").click(function (e) {
-      e.stopPropagation();
-      var newStatus = $(this).attr("status");
-      changer.remove();
-      self.master.beginTransaction();
-      task.changeStatus(newStatus);
-      self.master.endTransaction();
-      el.attr("status", task.status);
-    });
-    el.oneTime(3000, "hideChanger", function () {
-      changer.remove();
-    });
-    el.after(changer);
-  });
-
-
-
-  //bind row selection
-  taskRow.click(function () {
-    var row = $(this);
-    //var isSel = row.hasClass("rowSelected");
-    row.closest("table").find(".rowSelected").removeClass("rowSelected");
-    row.addClass("rowSelected");
-
-    //set current task
-    self.master.currentTask = self.master.getTask(row.attr("taskId"));
-
-    //move highlighter
-    self.master.gantt.synchHighlight();
-
-    //if offscreen scroll to element
-    var top = row.position().top;
-    if (top > self.element.parent().height()) {
-      row.offsetParent().scrollTop(top - self.element.parent().height() + 100);
-    } else if (top<40){
-      row.offsetParent().scrollTop(row.offsetParent().scrollTop()-40+top);
-    }
-  });
-
-};
-
-
-GridEditor.prototype.openFullEditor = function (task, taskRow) {
-
-  var self = this;
-
-  //task editor in popup
-  var taskId = taskRow.attr("taskId");
-  //console.debug(task);
-
-  //make task editor
-  var taskEditor = $.JST.createFromTemplate({}, "TASK_EDITOR");
-
-  taskEditor.find("#name").val(task.name);
-  taskEditor.find("#description").val(task.description);
-  taskEditor.find("#code").val(task.code);
-  taskEditor.find("#progress").val(task.progress ? parseFloat(task.progress) : 0);
-  taskEditor.find("#status").attr("status", task.status);
-
-  if (task.startIsMilestone)
-    taskEditor.find("#startIsMilestone").attr("checked", true);
-  if (task.endIsMilestone)
-    taskEditor.find("#endIsMilestone").attr("checked", true);
-
-  taskEditor.find("#duration").val(task.duration);
-  var startDate = taskEditor.find("#start");
-  startDate.val(new Date(task.start).format());
-  //start is readonly in case of deps
-  if (task.depends) {
-    startDate.attr("readonly", "true");
-  } else {
-    startDate.removeAttr("readonly");
-  }
-
-  taskEditor.find("#end").val(new Date(task.end).format());
-  taskEditor.find("#total_length").val(task.total_length);
-
-  //taskEditor.find("[name=depends]").val(task.depends);
-
-  //make assignments table
-  var assigsTable = taskEditor.find("#assigsTable");
-  assigsTable.find("[assigId]").remove();
-  // loop on already assigned resources
-  for (var i = 0; i < task.assigs.length; i++) {
-    var assig = task.assigs[i];
-    var assigRow = $.JST.createFromTemplate({task:task, assig:assig}, "ASSIGNMENT_ROW");
-    assigsTable.append(assigRow);
-  }
-
-  //define start end callbacks
-  function startChangeCallback(date) {
-    var dur = parseInt(taskEditor.find("#duration").val());
-    date.clearTime();
-    taskEditor.find("#end").val(new Date(computeEndByDuration(date.getTime(), dur)).format());
-  }
-
-  function endChangeCallback(end) {
-    var start = Date.parseString(taskEditor.find("#start").val());
-    end.setHours(23, 59, 59, 999);
-
-    if (end.getTime() < start.getTime()) {
-      var dur = parseInt(taskEditor.find("#duration").val());
-      start = incrementDateByWorkingDays(end.getTime(), -dur);
-      taskEditor.find("#start").val(new Date(computeStart(start)).format());
-    } else {
-      taskEditor.find("#duration").val(recomputeDuration(start.getTime(), end.getTime()));
-    }
-  }
-
-
-  if (!self.master.canWrite || !task.canWrite) {
-    taskEditor.find("input,textarea").attr("readOnly", true);
-    taskEditor.find("input:checkbox,select").attr("disabled", true);
-    taskEditor.find("#saveButton").remove();
-
-  } else {
-
-    //bind dateField on dates
-    taskEditor.find("#start").click(function () {
-      $(this).dateField({
-        inputField:$(this),
-        callback:  startChangeCallback
-      });
-    }).blur(function () {
-        var inp = $(this);
-        if (!Date.isValid(inp.val())) {
-          alert(GanttMaster.messages["INVALID_DATE_FORMAT"]);
-          inp.val(inp.getOldValue());
-        } else {
-          startChangeCallback(Date.parseString(inp.val()))
-        }
-      });
-
-    //bind dateField on dates
-    taskEditor.find("#end").click(function () {
-      $(this).dateField({
-        inputField:$(this),
-        callback:  endChangeCallback
-      });
-    }).blur(function () {
-        var inp = $(this);
-        if (!Date.isValid(inp.val())) {
-          alert(GanttMaster.messages["INVALID_DATE_FORMAT"]);
-          inp.val(inp.getOldValue());
-        } else {
-          endChangeCallback(Date.parseString(inp.val()))
-        }
-      });
-
-    //bind blur on duration
-    taskEditor.find("#duration").change(function () {
-      var start = Date.parseString(taskEditor.find("#start").val());
-      var el = $(this);
-      var dur = parseInt(el.val());
-      dur = dur <= 0 ? 1 : dur;
-      el.val(dur);
-      taskEditor.find("#end").val(new Date(computeEndByDuration(start.getTime(), dur)).format());
-    });
-
-
-    //bind add assignment
-    taskEditor.find("#addAssig").click(function () {
-      var assigsTable = taskEditor.find("#assigsTable");
-      var assigRow = $.JST.createFromTemplate({task:task, assig:{id:"tmp_" + new Date().getTime()}}, "ASSIGNMENT_ROW");
-      assigsTable.append(assigRow);
-      $("#bwinPopupd").scrollTop(10000);
-    });
-
-    taskEditor.find("#status").click(function () {
-      var tskStatusChooser = $(this);
-      var changer = $.JST.createFromTemplate({}, "CHANGE_STATUS");
-      changer.find("[status=" + task.status + "]").addClass("selected");
-      changer.find(".taskStatus").click(function (e) {
-        e.stopPropagation();
-        tskStatusChooser.attr("status", $(this).attr("status"));
-        changer.remove();
-      });
-      tskStatusChooser.oneTime(3000, "hideChanger", function () {
-        changer.remove();
-      });
-      tskStatusChooser.after(changer);
-    });
-
-
-    //save task
-    taskEditor.find("#saveButton").click(function () {
-      var task = self.master.getTask(taskId); // get task again because in case of rollback old task is lost
-
-      self.master.beginTransaction();
-      task.name = taskEditor.find("#name").val();
-      task.description = taskEditor.find("#description").val();
-      task.code = taskEditor.find("#code").val();
-      task.progress = parseFloat(taskEditor.find("#progress").val());
-      task.duration = parseInt(taskEditor.find("#duration").val());
-      task.startIsMilestone = taskEditor.find("#startIsMilestone").is(":checked");
-      task.endIsMilestone = taskEditor.find("#endIsMilestone").is(":checked");
-      task.total_length = taskEditor.find("#total_length").val();
-
-      //set assignments
-      taskEditor.find("tr[assigId]").each(function () {
-        var trAss = $(this);
-        var assId = trAss.attr("assigId");
-        var resId = trAss.find("[name=resourceId]").val();
-        var roleId = trAss.find("[name=roleId]").val();
-        var effort = millisFromString(trAss.find("[name=effort]").val());
-
-
-        //check if an existing assig has been deleted and re-created with the same values
-        var found = false;
-        for (var i = 0; i < task.assigs.length; i++) {
-          var ass = task.assigs[i];
-
-          if (assId == ass.id) {
-            ass.effort = effort;
-            ass.roleId = roleId;
-            ass.resourceId = resId;
-            ass.touched = true;
-            found = true;
-            break;
-
-          } else if (roleId == ass.roleId && resId == ass.resourceId) {
-            ass.effort = effort;
-            ass.touched = true;
-            found = true;
-            break;
-
-          }
-        }
-
-        if (!found) { //insert
-          var ass = task.createAssignment("tmp_" + new Date().getTime(), resId, roleId, effort);
-          ass.touched = true;
-        }
-
-      });
-
-      //remove untouched assigs
-      task.assigs = task.assigs.filter(function (ass) {
-        var ret = ass.touched;
-        delete ass.touched;
-        return ret;
-      });
-
-      //change dates
-      task.setPeriod(Date.parseString(taskEditor.find("#start").val()).getTime(), Date.parseString(taskEditor.find("#end").val()).getTime() + (3600000 * 24));
-
-      //change status
-      task.changeStatus(taskEditor.find("#status").attr("status"));
-
-      if (self.master.endTransaction()) {
-        $("#__blackpopup__").trigger("close");
-      }
-
-    });
-  }
-
-  var ndo = createBlackPage(800, 500).append(taskEditor);
-
-};
